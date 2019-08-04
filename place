@@ -363,7 +363,7 @@ def set_up_cli_logging():
     stderr_handler = _logging.StreamHandler(sys.stderr)
     stderr_handler.setLevel(_logging.WARNING)
     stderr_handler.setFormatter(
-        _logging.Formatter("%(levelname)s: %(message)s\n")
+        _logging.Formatter("%(levelname)s: %(message)s")
     )
     root_logger.addHandler(stderr_handler)
     stdout_handler = _logging.StreamHandler(sys.stdout)
