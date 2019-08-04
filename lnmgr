@@ -338,10 +338,16 @@ def main(argv):
         dry_run=args.dry_run,
     )
     if changed_paths:
+        if args.dry_run:
+            verb_phrase = "would have been"
+        elif len(changed_paths) == 1:
+            verb_phrase = "was"
+        else:
+            verb_phrase = "were"
         logger.info(
             "%s %s changed",
             "A path" if len(changed_paths) == 1 else "Some paths",
-            "would have been" if args.dry_run else "were",
+            verb_phrase,
         )
         return args.if_changed
     else:
