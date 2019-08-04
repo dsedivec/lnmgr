@@ -198,6 +198,7 @@ def remove_links_into(
                         dest_file,
                         dest_link,
                     )
+    return changed_paths
 
 
 def fix_perms(dest_root, config, dry_run=None):
@@ -277,13 +278,15 @@ def sync_tree(source_root, dest_root, config, uninstall=None, dry_run=None):
         "global", "remove_broken_dest_links", True
     ):
         source_root_abs_prefix = os.path.abspath(source_root) + os.path.sep
-        remove_links_into(
-            source_root_abs_prefix,
-            dest_root,
-            dest_dirs,
-            config,
-            delete_valid_links=uninstall,
-            dry_run=dry_run,
+        changed_paths.update(
+            remove_links_into(
+                source_root_abs_prefix,
+                dest_root,
+                dest_dirs,
+                config,
+                delete_valid_links=uninstall,
+                dry_run=dry_run,
+            )
         )
     else:
         logger.debug("configured not to look for broken links in dest")
