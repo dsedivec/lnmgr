@@ -14,7 +14,7 @@ def raise_exception(ex):
     raise ex
 
 
-class PlaceConfigParser(ConfigParser.RawConfigParser):
+class AugmentedConfigParser(ConfigParser.RawConfigParser):
     RAISE_ERROR = object()
 
     def _call_getter(self, getter, section, option, default):
@@ -302,7 +302,7 @@ def main(argv):
     log_options.add_argument("--quiet", "-q", action="store_true")
     log_options.add_argument("--debug", action="store_true")
     parser.add_argument("--dry-run", "-n", action="store_true")
-    parser.add_argument("--place-dir", "-d", default=".")
+    parser.add_argument("--package-root", "-d", default=".")
     parser.add_argument(
         "--target", "-t", metavar="TARGET_DIR", default=os.path.expanduser("~")
     )
@@ -322,15 +322,15 @@ def main(argv):
     else:
         level = _logging.INFO
     logger.setLevel(level)
-    config = PlaceConfigParser()
-    config_file = os.path.join(args.place_dir, "place.ini")
+    config = AugmentedConfigParser()
+    config_file = os.path.join(args.package_root, "lnmgr.ini")
     logger.debug("will read config file %s", config_file)
     config.read(config_file)
-    package_dir = os.path.join(args.place_dir, args.package)
-    if not os.path.isdir(package_dir):
-        raise Exception("%s is not a directory" % (package_dir,))
+    package_root = os.path.join(args.package_root, args.package)
+    if not os.path.isdir(package_root):
+        raise Exception("%s is not a directory" % (package_root,))
     changed_paths = sync_tree(
-        package_dir,
+        package_root,
         args.target,
         config,
         uninstall=args.uninstall,
