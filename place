@@ -128,23 +128,6 @@ class DirSynchronizer(object):
                 dest_file_exists = True
             changed = CHANGED
             logger.info("%s: installed", source_file_rel_source)
-        desired_source_perms = self._config.getint(
-            source_config_sect, "mode", None
-        )
-        assert self._dry_run or dest_file_exists
-        if desired_source_perms is not None and dest_file_exists:
-            source_stat = os.stat(source_file)
-            current_source_perms = stat.S_IMODE(source_stat.st_mode)
-            if current_source_perms != desired_source_perms:
-                if not self._dry_run:
-                    os.chmod(source_file, desired_source_perms)
-                logger.info(
-                    "%s: changed mode from %05o to %05o",
-                    source_file_rel_source,
-                    current_source_perms,
-                    desired_source_perms,
-                )
-                changed = CHANGED
         return dest_file, changed
 
 
@@ -175,23 +158,6 @@ def remove_links_into(
                 "%s: dest dir doesn't exist or not a dir", dest_dir_rel_dest
             )
             continue
-        dest_dir_config_sect = "path %s" % (dest_dir_rel_dest,)
-        desired_dest_dir_perms = config.getint(
-            dest_dir_config_sect, "mode", None
-        )
-        if desired_dest_dir_perms is not None:
-            dest_dir_stat = os.stat(dest_dir)
-            current_dest_dir_perms = stat.S_IMODE(dest_dir_stat.st_mode)
-            if current_dest_dir_perms != desired_dest_dir_perms:
-                if not dry_run:
-                    os.chmod(dest_dir, desired_dest_dir_perms)
-                logger.info(
-                    "%s: changed mode from %05o to %05o",
-                    dest_dir_rel_dest,
-                    current_dest_dir_perms,
-                    desired_dest_dir_perms,
-                )
-                changed_paths.add(os.path.abspath(dest_dir))
         for file_name in os.listdir(dest_dir):
             dest_file = os.path.join(dest_dir, file_name)
             dest_file_ign_path = os.path.sep.join(
@@ -232,6 +198,42 @@ def remove_links_into(
                         dest_file,
                         dest_link,
                     )
+
+
+def fix_perms(dest_root, config, dry_run=None):
+    changed_paths = set()
+    for section in config.sections():
+        if not section.startswith("path "):
+            continue
+        dest_file_desired_mode = config.getint(section, "mode", None)
+        if dest_file_desired_mode is None:
+            continue
+        dest_rel_file = section[5:]
+        if os.path.isabs(dest_rel_file):
+            logger.warn(
+                "config section %r does not specify a relative path, skipping",
+                section,
+            )
+            continue
+        dest_rel_file = os.path.normpath(dest_rel_file)
+        dest_file = os.path.abspath(os.path.join(dest_root, dest_rel_file))
+        try:
+            dest_stat = os.stat(dest_file)
+        except os.error:
+            logger.exception("%s: can't stat, skipping", dest_file)
+            continue
+        dest_file_current_mode = stat.S_IMODE(dest_stat.st_mode)
+        if dest_file_current_mode != dest_file_desired_mode:
+            if not dry_run:
+                os.chmod(dest_file, dest_file_desired_mode)
+            logger.info(
+                "%s: changed mode from %05o to %05o",
+                dest_file,
+                dest_file_current_mode,
+                dest_file_desired_mode,
+            )
+            changed_paths.add(dest_file)
+    return changed_paths
 
 
 def sync_tree(source_root, dest_root, config, uninstall=None, dry_run=None):
@@ -285,6 +287,9 @@ def sync_tree(source_root, dest_root, config, uninstall=None, dry_run=None):
         )
     else:
         logger.debug("configured not to look for broken links in dest")
+    if not uninstall:
+        logger.debug("fixing permissions")
+        changed_paths.update(fix_perms(dest_root, config, dry_run=dry_run))
     return changed_paths
 
 
