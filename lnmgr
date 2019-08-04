@@ -120,7 +120,8 @@ class DirSynchronizer(object):
             logger.debug("%s: already installed", source_file_rel_source)
         else:
             if not self._dry_run:
-                os.makedirs(self.dest_dir)
+                if not os.path.isdir(self.dest_dir):
+                    os.makedirs(self.dest_dir)
                 os.symlink(
                     os.path.join(self._source_dir_rel_dest, file_name),
                     dest_file,
