@@ -1,0 +1,372 @@
+#!/usr/bin/env python
+
+import ConfigParser
+import argparse
+import logging as _logging
+import os
+import os.path
+import re
+import stat
+import sys
+
+
+def raise_exception(ex):
+    raise ex
+
+
+class PlaceConfigParser(ConfigParser.RawConfigParser):
+    RAISE_ERROR = object()
+
+    def _call_getter(self, getter, section, option, default):
+        try:
+            return getter(self, section, option)
+        except (ConfigParser.NoSectionError, ConfigParser.NoOptionError):
+            if default is self.RAISE_ERROR:
+                raise
+            return default
+
+    def get(self, section, option, default=RAISE_ERROR):
+        return self._call_getter(
+            ConfigParser.RawConfigParser.get, section, option, default
+        )
+
+    def getboolean(self, section, option, default=RAISE_ERROR):
+        return self._call_getter(
+            ConfigParser.RawConfigParser.getboolean, section, option, default
+        )
+
+    def getint(self, section, option, default=RAISE_ERROR):
+        # RawConfigParser.getint doesn't read prefixes like 0 for
+        # octal or 0x for hex, so do it ourselves.
+        value = self.get(section, option, default=default)
+        if isinstance(value, basestring):
+            value = int(value, 0)
+        return value
+
+    def get_ignore_regexps(self, option, section="global"):
+        ignore_regexps = []
+        for regexp in self.get(section, option, "").splitlines():
+            regexp = regexp.strip()
+            if regexp:
+                logger.debug("read ignore regexp %r", regexp)
+                ignore_regexps.append(re.compile(regexp))
+        return ignore_regexps
+
+
+CHANGED, IGNORED = "changed", "ignored"
+
+
+class DirSynchronizer(object):
+    def __init__(
+        self,
+        source_root,
+        source_dir,
+        dest_root,
+        config,
+        ignore_regexps,
+        dry_run=None,
+    ):
+        logger.debug("new synchronizer for %r", source_dir)
+        self._source_dir = source_dir
+        self._dest_root = dest_root
+        self._config = config
+        self._ignore_regexps = ignore_regexps
+        self._dry_run = dry_run
+        self._source_dir_rel_source = os.path.relpath(source_dir, source_root)
+        self.dest_dir = os.path.normpath(
+            os.path.join(dest_root, self._source_dir_rel_source)
+        )
+        self._source_dir_rel_dest = os.path.relpath(source_dir, self.dest_dir)
+
+    def sync_file(self, file_name, is_dir):
+        changed = None
+        source_file = os.path.abspath(os.path.join(self._source_dir, file_name))
+        source_file_rel_source = os.path.normpath(
+            os.path.join(self._source_dir_rel_source, file_name)
+        )
+        source_file_ign_path = os.path.sep + source_file_rel_source
+        dest_file = os.path.abspath(
+            os.path.join(self._dest_root, source_file_rel_source)
+        )
+        if any(
+            regexp.search(source_file_ign_path)
+            for regexp in self._ignore_regexps
+        ):
+            logger.debug("%s: ignored", source_file_rel_source)
+            return dest_file, IGNORED
+        source_config_sect = "path %s" % (source_file_rel_source,)
+        if is_dir and not self._config.getboolean(
+            source_config_sect, "symlink_dir", False
+        ):
+            logger.debug(
+                "%s: will traverse directory (section=%r)",
+                source_file_rel_source,
+                source_config_sect,
+            )
+            return dest_file, changed
+        elif is_dir:
+            logger.debug(
+                "%s: dir has symlink_dir = true", source_file_rel_source
+            )
+        dest_file_exists = os.path.exists(dest_file)
+        if dest_file_exists:
+            if not os.path.samefile(dest_file, source_file):
+                raise Exception(
+                    (
+                        "%s already exists and is not a link to %s"
+                        % (dest_file, source_file)
+                    )
+                )
+            logger.debug("%s: already installed", source_file_rel_source)
+        else:
+            if not self._dry_run:
+                os.makedirs(self.dest_dir)
+                os.symlink(
+                    os.path.join(self._source_dir_rel_dest, file_name),
+                    dest_file,
+                )
+                dest_file_exists = True
+            changed = CHANGED
+            logger.info("%s: installed", source_file_rel_source)
+        desired_source_perms = self._config.getint(
+            source_config_sect, "mode", None
+        )
+        assert self._dry_run or dest_file_exists
+        if desired_source_perms is not None and dest_file_exists:
+            source_stat = os.stat(source_file)
+            current_source_perms = stat.S_IMODE(source_stat.st_mode)
+            if current_source_perms != desired_source_perms:
+                if not self._dry_run:
+                    os.chmod(source_file, desired_source_perms)
+                logger.info(
+                    "%s: changed mode from %05o to %05o",
+                    source_file_rel_source,
+                    current_source_perms,
+                    desired_source_perms,
+                )
+                changed = CHANGED
+        return dest_file, changed
+
+
+def remove_links_into(
+    link_target_prefix,
+    search_root,
+    subdirs_to_search,
+    config,
+    delete_valid_links=None,
+    dry_run=None,
+):
+    logger.debug("looking for symlinks into %r", link_target_prefix)
+    assert link_target_prefix.endswith(os.path.sep)
+    changed_paths = set()
+    dest_ignore_regexps = config.get_ignore_regexps("dst_ignore")
+    for dest_dir in subdirs_to_search:
+        dest_dir_rel_dest = os.path.normpath(
+            os.path.relpath(dest_dir, search_root)
+        )
+        dest_dir_ign_path = os.path.sep + os.path.relpath(dest_dir, search_root)
+        if any(
+            regexp.search(dest_dir_ign_path) for regexp in dest_ignore_regexps
+        ):
+            logger.debug("%s: ignored whole dest dir", dest_dir_rel_dest)
+            continue
+        if not os.path.isdir(dest_dir):
+            logger.debug(
+                "%s: dest dir doesn't exist or not a dir", dest_dir_rel_dest
+            )
+            continue
+        dest_dir_config_sect = "path %s" % (dest_dir_rel_dest,)
+        desired_dest_dir_perms = config.getint(
+            dest_dir_config_sect, "mode", None
+        )
+        if desired_dest_dir_perms is not None:
+            dest_dir_stat = os.stat(dest_dir)
+            current_dest_dir_perms = stat.S_IMODE(dest_dir_stat.st_mode)
+            if current_dest_dir_perms != desired_dest_dir_perms:
+                if not dry_run:
+                    os.chmod(dest_dir, desired_dest_dir_perms)
+                logger.info(
+                    "%s: changed mode from %05o to %05o",
+                    dest_dir_rel_dest,
+                    current_dest_dir_perms,
+                    desired_dest_dir_perms,
+                )
+                changed_paths.add(os.path.abspath(dest_dir))
+        for file_name in os.listdir(dest_dir):
+            dest_file = os.path.join(dest_dir, file_name)
+            dest_file_ign_path = os.path.sep.join(
+                (dest_dir_ign_path, file_name)
+            )
+            if any(
+                regexp.search(dest_file_ign_path)
+                for regexp in dest_ignore_regexps
+            ):
+                logger.debug("%s: ignored dest file", dest_file)
+                continue
+            if not os.path.islink(dest_file):
+                logger.debug("%s: not a symlink", dest_file)
+                continue
+            if delete_valid_links or not os.path.exists(dest_file):
+                # Determine if this broken link points into
+                # source_root.  Made a conscious choice not to use
+                # realpath here, only want to dereference one
+                # level of links.
+                dest_link = os.readlink(dest_file)
+                if not os.path.isabs(dest_link):
+                    dest_link = os.path.join(dest_dir, dest_link)
+                dest_link = os.path.normpath(dest_link)
+                if dest_link.startswith(link_target_prefix):
+                    try:
+                        if not dry_run:
+                            os.unlink(dest_file)
+                    except os.error:
+                        logger.exception(
+                            "%s: failed to remove broken dest link", dest_file
+                        )
+                    else:
+                        changed_paths.add(os.path.abspath(dest_file))
+                        logger.info("%s: removed", dest_file)
+                else:
+                    logger.debug(
+                        "%s: link %r not within our source root",
+                        dest_file,
+                        dest_link,
+                    )
+
+
+def sync_tree(source_root, dest_root, config, uninstall=None, dry_run=None):
+    source_root = os.path.normpath(source_root)
+    dest_root = os.path.normpath(dest_root)
+    source_ignore_regexps = config.get_ignore_regexps("src_ignore")
+    changed_paths = set()
+    dest_dirs = []
+    for dir_path, dir_names, file_names in os.walk(
+        source_root, onerror=raise_exception
+    ):
+        single_dir_syncer = DirSynchronizer(
+            source_root,
+            dir_path,
+            dest_root,
+            config,
+            source_ignore_regexps,
+            dry_run=dry_run,
+        )
+        dest_dirs.append(single_dir_syncer.dest_dir)
+        if not uninstall:
+            for file_name in file_names:
+                dest_file, result = single_dir_syncer.sync_file(
+                    file_name, is_dir=False
+                )
+                if result is CHANGED:
+                    changed_paths.add(dest_file)
+            # Iterating over indexes in reverse order because we
+            # delete items from dir_names to prevent os.walk from
+            # traversing ignored directories.
+            for idx in reversed(xrange(len(dir_names))):
+                file_name = dir_names[idx]
+                dest_file, result = single_dir_syncer.sync_file(
+                    file_name, is_dir=True
+                )
+                if result is IGNORED:
+                    del dir_names[idx]
+                elif result is CHANGED:
+                    changed_paths.add(dest_file)
+    if uninstall or config.getboolean(
+        "global", "remove_broken_dest_links", True
+    ):
+        source_root_abs_prefix = os.path.abspath(source_root) + os.path.sep
+        remove_links_into(
+            source_root_abs_prefix,
+            dest_root,
+            dest_dirs,
+            config,
+            delete_valid_links=uninstall,
+            dry_run=dry_run,
+        )
+    else:
+        logger.debug("configured not to look for broken links in dest")
+    return changed_paths
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog=argv[0])
+    log_options = parser.add_mutually_exclusive_group()
+    log_options.add_argument("--quiet", "-q", action="store_true")
+    log_options.add_argument("--debug", action="store_true")
+    parser.add_argument("--dry-run", "-n", action="store_true")
+    parser.add_argument("--place-dir", "-d", default=".")
+    parser.add_argument(
+        "--target", "-t", metavar="TARGET_DIR", default=os.path.expanduser("~")
+    )
+    parser.add_argument("--uninstall", "-U", action="store_true")
+    parser.add_argument(
+        "--if-changed", metavar="EXIT_STATUS", type=int, default=0
+    )
+    parser.add_argument(
+        "--if-unchanged", metavar="EXIT_STATUS", type=int, default=0
+    )
+    parser.add_argument("package")
+    args = parser.parse_args(argv[1:])
+    if args.debug:
+        level = _logging.DEBUG
+    elif args.quiet:
+        level = _logging.WARNING
+    else:
+        level = _logging.INFO
+    logger.setLevel(level)
+    config = PlaceConfigParser()
+    config_file = os.path.join(args.place_dir, "place.ini")
+    logger.debug("will read config file %s", config_file)
+    config.read(config_file)
+    package_dir = os.path.join(args.place_dir, args.package)
+    if not os.path.isdir(package_dir):
+        raise Exception("%s is not a directory" % (package_dir,))
+    changed_paths = sync_tree(
+        package_dir,
+        args.target,
+        config,
+        uninstall=args.uninstall,
+        dry_run=args.dry_run,
+    )
+    if changed_paths:
+        logger.info(
+            "%s %s changed",
+            "A path" if len(changed_paths) == 1 else "Some paths",
+            "would have been" if args.dry_run else "were",
+        )
+        return args.if_changed
+    else:
+        logger.info("No changes necessary")
+        return args.if_unchanged
+
+
+class MaxLevelFilter(_logging.Filter):
+    def __init__(self, max_level, name=""):
+        _logging.Filter.__init__(self, name=name)
+        self._max_level = max_level
+
+    def filter(self, record):
+        return record.levelno <= self._max_level
+
+
+def set_up_cli_logging():
+    root_logger = _logging.getLogger()
+    root_logger.setLevel(_logging.WARNING)
+    stderr_handler = _logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(_logging.WARNING)
+    stderr_handler.setFormatter(
+        _logging.Formatter("%(levelname)s: %(message)s\n")
+    )
+    root_logger.addHandler(stderr_handler)
+    stdout_handler = _logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(_logging.Formatter())
+    stdout_handler.addFilter(MaxLevelFilter(_logging.INFO))
+    root_logger.addHandler(stdout_handler)
+
+
+if __name__ == "__main__":
+    set_up_cli_logging()
+    logger = _logging.getLogger(os.path.basename(sys.argv[0]))
+    sys.exit(main(sys.argv) or 0)
+else:
+    logger = _logging.getLogger(__name__)
