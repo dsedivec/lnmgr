@@ -1,6 +1,6 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
-import ConfigParser
+import configparser
 import argparse
 import logging as _logging
 import os
@@ -14,33 +14,44 @@ def raise_exception(ex):
     raise ex
 
 
-class AugmentedConfigParser(ConfigParser.RawConfigParser):
+class AugmentedConfigParser(configparser.RawConfigParser):
     RAISE_ERROR = object()
 
-    def _call_getter(self, getter, section, option, default):
+    def _call_getter(self, getter, section, option, default, **kwargs):
         try:
-            return getter(self, section, option)
-        except (ConfigParser.NoSectionError, ConfigParser.NoOptionError):
+            return getter(self, section, option, **kwargs)
+        except (configparser.NoSectionError, configparser.NoOptionError):
             if default is self.RAISE_ERROR:
                 raise
             return default
 
-    def get(self, section, option, default=RAISE_ERROR):
+    def get(self, section, option, default=RAISE_ERROR, **kwargs):
         return self._call_getter(
-            ConfigParser.RawConfigParser.get, section, option, default
+            configparser.RawConfigParser.get, section, option, default, **kwargs
         )
 
-    def getboolean(self, section, option, default=RAISE_ERROR):
+    def getboolean(self, section, option, default=RAISE_ERROR, **kwargs):
         return self._call_getter(
-            ConfigParser.RawConfigParser.getboolean, section, option, default
+            configparser.RawConfigParser.getboolean,
+            section,
+            option,
+            default,
+            **kwargs
         )
 
-    def getint(self, section, option, default=RAISE_ERROR):
+    def getint(self, section, option, default=RAISE_ERROR, **kwargs):
         # RawConfigParser.getint doesn't read prefixes like 0 for
-        # octal or 0x for hex, so do it ourselves.
-        value = self.get(section, option, default=default)
-        if isinstance(value, basestring):
-            value = int(value, 0)
+        # octal or 0x for hex, so do it ourselves.  Python 3 stopped
+        # allowing 0 as a prefix for octal, now you have to use 0o.
+        # We'll emulate the old behavior.  (I wonder if there's an
+        # API in the standard library for parsing standard octal
+        # file permissions masks?)
+        value = self.get(section, option, default=default, **kwargs)
+        if isinstance(value, str):
+            if re.search(r"^0\d", value):
+                value = int(value, 8)
+            else:
+                value = int(value, 0)
         return value
 
     def get_ignore_regexps(self, option, section="global"):
@@ -266,7 +277,7 @@ def sync_tree(source_root, dest_root, config, uninstall=None, dry_run=None):
             # Iterating over indexes in reverse order because we
             # delete items from dir_names to prevent os.walk from
             # traversing ignored directories.
-            for idx in reversed(xrange(len(dir_names))):
+            for idx in reversed(range(len(dir_names))):
                 file_name = dir_names[idx]
                 dest_file, result = single_dir_syncer.sync_file(
                     file_name, is_dir=True
